@@ -120,41 +120,43 @@ func trace(args []string) error {
 	if err != nil {
 		log.Fatal(err)
 	}
+	err = cmd.Start()
+	if err != nil {
+		return fmt.Errorf("could not start `go test`: %w", err)
+	}
 	decoder := json.NewDecoder(r)
-	go func() {
-		for decoder.More() {
-			var data goTestOutput
-			if err := decoder.Decode(&data); err != nil {
-				if err == io.EOF {
-					return
-				}
-				log.Printf("Failed to decode JSON: %v", err)
+	for decoder.More() {
+		var data goTestOutput
+		if err := decoder.Decode(&data); err != nil {
+			if err == io.EOF {
+				break
 			}
-			switch data.Action {
-			case "run":
-				var span oteltrace.Span
-				_, span = t.Start(globalCtx, data.Test, oteltrace.WithTimestamp(data.Time))
-				collectedSpans[data.Test] = &spanData{
-					span:      span,
-					startTime: data.Time,
-				}
-			case "pass", "fail", "skip":
-				if data.Test == "" {
-					continue
-				}
-				spanData, ok := collectedSpans[data.Test]
-				if !ok {
-					return // should never happen
-				}
-				if data.Action == "fail" {
-					spanData.span.SetStatus(codes.Error, "")
-				}
-				spanData.span.End(oteltrace.WithTimestamp(data.Time))
-			}
-			fmt.Print(data.Output)
+			return fmt.Errorf("failed to decode JSON: %w", err)
 		}
-	}()
-	return cmd.Run()
+		switch data.Action {
+		case "run":
+			var span oteltrace.Span
+			_, span = t.Start(globalCtx, data.Test, oteltrace.WithTimestamp(data.Time))
+			collectedSpans[data.Test] = &spanData{
+				span:      span,
+				startTime: data.Time,
+			}
+		case "pass", "fail", "skip":
+			if data.Test == "" {
+				continue
+			}
+			spanData, ok := collectedSpans[data.Test]
+			if !ok {
+				return fmt.Errorf("missing spanData, should never happen")
+			}
+			if data.Action == "fail" {
+				spanData.span.SetStatus(codes.Error, "")
+			}
+			spanData.span.End(oteltrace.WithTimestamp(data.Time))
+		}
+		fmt.Print(data.Output)
+	}
+	return cmd.Wait()
 }
 
 type goTestOutput struct {
